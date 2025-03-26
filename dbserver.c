@@ -39,8 +39,11 @@ struct work_item {
 static struct {
     struct work_item *head;
     struct work_item *tail;
-} work_queue = {NULL, NULL};
+} work_queue = {NULL, NULL}; // work queue
 
+/*
+ * Enqueues a new work item to the work queue.
+ */
 void enqueue_work(int fd) {
 
     pthread_mutex_lock(&q_lock);
@@ -67,6 +70,9 @@ void enqueue_work(int fd) {
     pthread_mutex_unlock(&q_lock);
 }
 
+/*
+ * Dequeues a work item from the work queue.
+ */
 int dequeue_work(void) {
     pthread_mutex_lock(&q_lock);
 
@@ -89,6 +95,9 @@ int dequeue_work(void) {
     return fd;
 }
 
+/*
+ * Reads a fixed number of bytes from a file descriptor.
+ */
 int read_bytes(int fd, void *buf, int count) {
     int n;
     int bytes_read = 0;
@@ -102,6 +111,9 @@ int read_bytes(int fd, void *buf, int count) {
     return 1;
 }
 
+/*
+ * Writes a fixed number of bytes to a file descriptor.
+ */
 int write_bytes(int fd, void *buf, int count) {
     int n;
     int bytes_written = 0;
@@ -121,12 +133,16 @@ int find_free_slot(void);
 int write_to_file(const char *filename, const char *data, int len, int idx);
 int read_from_file(const char *filename, char *buf, int len, int idx);
 
+/*
+ * Writes data to the database and stores it in a file.
+ */
 int do_write(const char *key_name, const char *data, int len) {
 
     pthread_mutex_lock(&db_lock);
 
     int idx = find_key_index(key_name);
 
+    // if the key does not exist, find a free slot
     if (idx < 0) {
         idx = find_free_slot();
         if (idx < 0) {
@@ -137,6 +153,7 @@ int do_write(const char *key_name, const char *data, int len) {
         table[idx].name[sizeof(table[idx].name) - 1] = '\0';
         table[idx].state = STATE_BUSY;
     } else {
+        // if the key exists, check if it is busy
         if (table[idx].state == STATE_BUSY) {
             pthread_mutex_unlock(&db_lock);
             return 0;
@@ -146,20 +163,22 @@ int do_write(const char *key_name, const char *data, int len) {
 
     pthread_mutex_unlock(&db_lock);
 
-    usleep(random() % 10000);
-
     char filename[64];
     sprintf(filename, "/tmp/data.%d", idx);
     if (!write_to_file(filename, data, len, idx)) {
         return 0;
     }
 
+    // update the state of the key, lock the database
     pthread_mutex_lock(&db_lock);
     table[idx].state = STATE_VALID;
     pthread_mutex_unlock(&db_lock);
     return 1;
 }
 
+/*
+ * Reads data from the database.
+ */
 int do_read(char *key_name, char *buf, int *length) {
 
     pthread_mutex_lock(&db_lock);
@@ -179,10 +198,14 @@ int do_read(char *key_name, char *buf, int *length) {
         return 0;
     }
 
+    // update the length of the data
     *length = strlen(buf);
     return 1;
 }
 
+/*
+ * Deletes data from the database.
+ */
 int do_delete(const char *key_name) {
 
     pthread_mutex_lock(&db_lock);
@@ -200,11 +223,13 @@ int do_delete(const char *key_name) {
 
     char filename[64];
     sprintf(filename, "/tmp/data.%d", idx);
-    unlink(filename);
-
+    unlink(filename); // delete the file by unlinking it
     return 1;
 }
 
+/*
+ * Finds the index of a key in the database.
+ */
 int find_key_index(const char *key_name) {
     for (int i = 0; i < MAX_KEYS; i++) {
         if (table[i].state == STATE_VALID && strcmp(table[i].name, key_name) == 0) {
@@ -214,6 +239,9 @@ int find_key_index(const char *key_name) {
     return -1;
 }
 
+/*
+ * Finds a free slot in the database.
+ */
 int find_free_slot(void) {
     for (int i = 0; i < MAX_KEYS; i++) {
         if (table[i].state == STATE_INVALID) {
@@ -223,6 +251,9 @@ int find_free_slot(void) {
     return -1;
 }
 
+/*
+ * Writes data to a file.
+ */
 int write_to_file(const char *filename, const char *data, int len, int idx) {
 
     pthread_mutex_lock(&db_lock);
@@ -251,6 +282,9 @@ int write_to_file(const char *filename, const char *data, int len, int idx) {
     return 1;
 }
 
+/*
+ * Reads data from a file.
+ */
 int read_from_file(const char *filename, char *buf, int len, int idx) {
     int fd = open(filename, O_RDONLY);
 
@@ -299,6 +333,7 @@ void handle_work(int fd) {
     if (op == 'W') {
         stats_writes++;
 
+        // check the length of the data
         if (length < 0 || length > BUFFER_LENGTH) {
             stats_fails++;
             res.op_status = 'X';
@@ -306,6 +341,7 @@ void handle_work(int fd) {
             return;
         }
 
+        // read the data from the client
         char buf[BUFFER_LENGTH];
         if (!read_bytes(fd, buf, length)) {
             stats_fails++;
@@ -314,31 +350,42 @@ void handle_work(int fd) {
             return;
         }
 
+        // write the data to the database
         res.op_status = do_write(req.name, buf, length) ? 'K' : 'X';
         write_bytes(fd, &res, sizeof(res));
         stats_fails += res.op_status == 'X';
+
         printf("Wrote %d bytes\n", length);
         printf("Response: op=%c\n", res.op_status);
     } else if (op == 'R') {
         stats_reads++;
+
+        // read the data from the database
         char buf[BUFFER_LENGTH];
         res.op_status = do_read(req.name, buf, &length) ? 'K' : 'X';
         sprintf(res.len, "%d", length);
         write_bytes(fd, &res, sizeof(res));
+
+        // send the data to the client only if the operation was successful
         if (res.op_status == 'K') {
             write_bytes(fd, buf, length);
         }
         stats_fails += res.op_status == 'X';
+
         printf("Read %d bytes\n", length);
         printf("Response: op=%c len=%s\n", res.op_status, res.len);
     } else if (op == 'D') {
         stats_deletes++;
+
+        // delete the data from the database
         res.op_status = do_delete(req.name) ? 'K' : 'X';
         write_bytes(fd, &res, sizeof(res));
         stats_fails += res.op_status == 'X';
+
         printf("Deleted\n");
         printf("Response: op=%c\n", res.op_status);
     } else {
+        // When the operation is invalid, increment the fails counter
         stats_fails++;
         res.op_status = 'X';
         write_bytes(fd, &res, sizeof(res));
@@ -403,9 +450,8 @@ int main(int argc, char **argv) {
         table[i].state = STATE_INVALID;
     }
 
-    // create a socket
+    // initialize the server socket and bind it to the port
     int port = 5000;
-
     if (argc > 1) {
         port = atoi(argv[1]);
         if (port <= 0) {
@@ -413,10 +459,8 @@ int main(int argc, char **argv) {
             exit(1);
         }
     }
-
     server_socket = socket(AF_INET, SOCK_STREAM, 0);
 
-    // convert the port to network byte order
     struct sockaddr_in server_address = {
         .sin_family = AF_INET,
         .sin_port = htons(port),
