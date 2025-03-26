@@ -18,28 +18,72 @@ static struct {
     int state;
 } table[MAX_KEYS]; // database table
 
-int readBytes(int fd, void *buf, int count) {
+struct work_item {
+    int fd;
+    struct work_item *next;
+};
+
+static struct {
+    struct work_item *head;
+    struct work_item *tail;
+} work_queue = {NULL, NULL};
+
+void enqueue_work(int fd) {
+    struct work_item *item = malloc(sizeof(*item));
+    if (!item) {
+        perror("malloc");
+        exit(1);
+    }
+    item->fd = fd;
+    item->next   = NULL;
+
+    if (work_queue.tail) {
+        work_queue.tail->next = item;
+        work_queue.tail = item;
+    } else {
+        work_queue.head = item;
+        work_queue.tail = item;
+    }
+}
+
+int dequeue_work(void) {
+    if (work_queue.head == NULL) {
+        return -1;
+    }
+
+    struct work_item *item = work_queue.head;
+    work_queue.head = item->next;
+    if (work_queue.head == NULL) {
+        work_queue.tail = NULL;
+    }
+
+    int fd = item->fd;
+    free(item);
+    return fd;
+}
+
+int read_bytes(int fd, void *buf, int count) {
     int n;
-    int bytesRead = 0;
-    while (bytesRead < count) {
-        n = read(fd, buf + bytesRead, count - bytesRead);
+    int bytes_read = 0;
+    while (bytes_read < count) {
+        n = read(fd, buf + bytes_read, count - bytes_read);
         if (n < 0) {
             return 0;
         }
-        bytesRead += n;
+        bytes_read += n;
     }
     return 1;
 }
 
-int writeBytes(int fd, void *buf, int count) {
+int write_bytes(int fd, void *buf, int count) {
     int n;
-    int bytesWritten = 0;
-    while (bytesWritten < count) {
-        n = write(fd, buf + bytesWritten, count - bytesWritten);
+    int bytes_written = 0;
+    while (bytes_written < count) {
+        n = write(fd, buf + bytes_written, count - bytes_written);
         if (n < 0) {
             return 0;
         }
-        bytesWritten += n;
+        bytes_written += n;
     }
     return 1;
 }
@@ -183,9 +227,9 @@ void handle_work(int fd) {
     struct request req;
     struct request res;
 
-    if (!readBytes(fd, &req, sizeof(req))) {
+    if (!read_bytes(fd, &req, sizeof(req))) {
         res.op_status = 'X';
-        writeBytes(fd, &res, sizeof(res)); // write error
+        write_bytes(fd, &res, sizeof(res)); // write error
         close(fd);
         return;
     }
@@ -196,33 +240,33 @@ void handle_work(int fd) {
     if (op == 'W') {
         if (length < 0 || length > BUFFER_LENGTH) {
             res.op_status = 'X';
-            writeBytes(fd, &res, sizeof(res)); // write error
+            write_bytes(fd, &res, sizeof(res)); // write error
             return;
         }
 
         char buf[BUFFER_LENGTH];
-        if (!readBytes(fd, buf, length)) {
+        if (!read_bytes(fd, buf, length)) {
             res.op_status = 'X';
-            writeBytes(fd, &res, sizeof(res)); // write error
+            write_bytes(fd, &res, sizeof(res)); // write error
             return;
         }
 
         res.op_status = do_write(req.name, buf, length) ? 'K' : 'X';
-        writeBytes(fd, &res, sizeof(res));
+        write_bytes(fd, &res, sizeof(res));
     } else if (op == 'R') {
         char buf[BUFFER_LENGTH];
         res.op_status = do_read(req.name, buf, &length) ? 'K' : 'X';
         sprintf(res.len, "%d", length);
-        writeBytes(fd, &res, sizeof(res));
+        write_bytes(fd, &res, sizeof(res));
         if (res.op_status == 'K') {
-            writeBytes(fd, buf, length);
+            write_bytes(fd, buf, length);
         }
     } else if (op == 'D') {
         res.op_status = do_delete(req.name) ? 'K' : 'X';
-        writeBytes(fd, &res, sizeof(res));
+        write_bytes(fd, &res, sizeof(res));
     } else {
         res.op_status = 'X';
-        writeBytes(fd, &res, sizeof(res));
+        write_bytes(fd, &res, sizeof(res));
     }
 
 }
@@ -269,8 +313,11 @@ int main(void) {
             exit(1);
         }
 
-        handle_work(fd);
+        enqueue_work(fd);
 
-        close(fd);
+        while ((fd = dequeue_work()) >= 0) {
+            handle_work(fd);
+            close(fd);
+        }
     }
 }
